@@ -59,6 +59,8 @@ learn_arg.add_argument('--total_iter_per_epoch', type=int, default=10)
 
 # Attenuation option for L2F
 learn_arg.add_argument('--attenuate', action='store_true', help='Option to switch on attenuation module')
+# Option for ALFA
+learn_arg.add_argument('--alfa', action='store_true', help='Option to swtich on task-adaptive hyperparameters generation module')
 # Parameter-wise learnable learning rate option for MetaSGD
 learn_arg.add_argument('--metasgd', action='store_true', help='Option to change basic MAML to MetaSGD')
 

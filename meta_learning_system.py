@@ -91,7 +91,8 @@ class SceneAdaptiveInterpolation(nn.Module):
                                                                         optimizer=self.args.optimizer,
                                                                         init_learning_rate=self.inner_learning_rate,
                                                                         total_num_inner_loop_steps=self.args.number_of_training_steps_per_iter,
-                                                                        use_learnable_learning_rates=self.args.learnable_per_layer_per_step_inner_loop_learning_rate)
+                                                                        use_learnable_learning_rates=self.args.learnable_per_layer_per_step_inner_loop_learning_rate,
+                                                                        alfa=self.args.alfa)
         
         if self.args.model == 'dain':
             for k, v in self.net.named_parameters():
@@ -115,6 +116,16 @@ class SceneAdaptiveInterpolation(nn.Module):
             ).to(device=self.device)
             # initialize to output zero
             self.gamma_mult = nn.Parameter(torch.zeros(1))
+
+        if self.args.alfa:
+            #num_layers = len(names_weights_dict.keys())
+            num_layers = len(names_weights_dict.keys())
+            input_dim = num_layers * 2
+            self.regularizer = nn.Sequential(
+                nn.Linear(input_dim, input_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(input_dim, input_dim)
+            ).to(device=self.device)
 
         # print("Inner Loop parameters")
         # for key, value in self.inner_loop_optimizer.named_parameters():
@@ -291,7 +302,32 @@ class SceneAdaptiveInterpolation(nn.Module):
         grads = torch.autograd.grad(loss, names_weights_copy.values(),
                                     create_graph=use_second_order, allow_unused=True)
         names_grads_copy = dict(zip(names_weights_copy.keys(), grads))
-        
+
+        generated_alpha_params = {}
+        generated_beta_params = {}
+
+        if self.args.alfa:
+            per_step_task_embedding = []
+            i = 0
+            for k, v in names_weights_copy.items():
+                if grads[i] is not None:
+                    per_step_task_embedding.append(v.mean())
+                    per_step_task_embedding.append(grads[i].mean())
+                else:
+                    per_step_task_embedding.append(v.mean())
+                    per_step_task_embedding.append(torch.zeros(v.shape).cuda().mean())
+                i+=1
+
+            per_step_task_embedding = torch.stack(per_step_task_embedding)
+            generated_params = self.regularizer(per_step_task_embedding)
+            num_layers = len(names_weights_copy)
+
+            generated_alpha, generated_beta = torch.split(generated_params, split_size_or_sections=num_layers)
+            g = 0
+            for key in names_weights_copy.keys():
+                generated_alpha_params[key] = generated_alpha[g]
+                generated_beta_params[key] = generated_beta[g]
+                g+=1
 
         # names_weights_copy = {key: value[0] for key, value in names_weights_copy.items()}
 
@@ -301,11 +337,11 @@ class SceneAdaptiveInterpolation(nn.Module):
         #         print('Grads not found for inner loop parameter', key)
         #     names_grads_copy[key] = names_grads_copy[key].sum(dim=0)
 
-
         names_weights_copy = self.inner_loop_optimizer.update_params(names_weights_dict=names_weights_copy,
                                                                      names_grads_wrt_params_dict=names_grads_copy,
+                                                                     generated_alpha_params=generated_alpha_params,
+                                                                     generated_beta_params=generated_beta_params,
                                                                      num_step=current_step_idx)
-        
         # loss.backward()
         # self.inner_loop_optimizer.step()
 

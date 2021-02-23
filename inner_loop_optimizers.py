@@ -68,7 +68,7 @@ class LSLRGradientDescentLearningRule(nn.Module):
     will correspond to a stochastic gradient descent learning rule.
     """
 
-    def __init__(self, device, optimizer, total_num_inner_loop_steps, use_learnable_learning_rates, init_learning_rate=1e-3):
+    def __init__(self, device, optimizer, total_num_inner_loop_steps, use_learnable_learning_rates, init_learning_rate=1e-3, init_weight_decay=5e-4, alfa=False):
         """Creates a new learning rule object.
         Args:
             init_learning_rate: A postive scalar to scale gradient updates to the
@@ -80,6 +80,9 @@ class LSLRGradientDescentLearningRule(nn.Module):
 
         # print(init_learning_rate)
         # assert init_learning_rate > 0., 'learning_rate should be positive.'
+
+        self.init_weight_decay = torch.ones(1) * init_weight_decay
+        self.init_weight_decay.to(device)
         
         self.init_learning_rate = torch.ones(1) * init_learning_rate
         self.init_learning_rate.to(device)
@@ -93,13 +96,20 @@ class LSLRGradientDescentLearningRule(nn.Module):
         self.weight_decay = 0
         self.eps = 1e-8
 
+        self.alfa = alfa
+
 
     def initialize(self, names_weights_dict):
         self.names_learning_rates_dict = nn.ParameterDict()
+        self.names_weight_decay_dict = nn.ParameterDict()
         for idx, (key, param) in enumerate(names_weights_dict.items()):
             self.names_learning_rates_dict[key.replace(".", "-")] = nn.Parameter(
                 data=torch.ones(self.total_num_inner_loop_steps + 1) * self.init_learning_rate,
-                requires_grad=self.use_learnable_learning_rates)
+                requires_grad=self.use_learnable_learning_rates or self.alfa)
+            
+            self.names_weight_decay_dict[key.replace(".", "-")] = nn.Parameter(
+                data=torch.ones(self.total_num_inner_loop_steps + 1) * self.init_weight_decay * self.init_learning_rate,
+                requires_grad=self.use_learnable_learning_rates or self.alfa)
 
     def initialize_state(self):
         self.state = defaultdict(dict)
@@ -112,7 +122,7 @@ class LSLRGradientDescentLearningRule(nn.Module):
         #     param.fill_(self.init_learning_rate)
         pass
 
-    def update_params(self, names_weights_dict, names_grads_wrt_params_dict, num_step, tau=0.1):
+    def update_params(self, names_weights_dict, names_grads_wrt_params_dict, generated_alpha_params, generated_beta_params, num_step, tau=0.1):
         """Applies a single gradient descent update to all parameters.
         All parameter updates are performed using in-place operations and so
         nothing is returned.
@@ -122,32 +132,36 @@ class LSLRGradientDescentLearningRule(nn.Module):
                 previously, with this list expected to be in the same order.
         """
         if self.optimizer == 'SGD':
-            return self.update_sgd(names_weights_dict, names_grads_wrt_params_dict, num_step, tau=0.1)
+            return self.update_sgd(names_weights_dict, names_grads_wrt_params_dict, generated_alpha_params, generated_beta_params, num_step, tau=0.1)
         elif self.optimizer == 'Adam':
-            return self.update_adam(names_weights_dict, names_grads_wrt_params_dict, num_step, tau=0.1)
+            return self.update_adam(names_weights_dict, names_grads_wrt_params_dict, generated_alpha_params, generated_beta_params, num_step, tau=0.1)
         elif self.optimizer == 'Adamax':
-            return self.update_adamax(names_weights_dict, names_grads_wrt_params_dict, num_step, tau=0.1)
+            return self.update_adamax(names_weights_dict, names_grads_wrt_params_dict, generated_alpha_params, generated_beta_params, num_step, tau=0.1)
         else:
             raise NotImplementedError('This type of optimizer update operation is not yet implemented')
 
         return dict()
 
 
-    def update_sgd(self, names_weights_dict, names_grads_wrt_params_dict, num_step, tau=0.1):
+    def update_sgd(self, names_weights_dict, names_grads_wrt_params_dict, generated_alpha_params, generated_beta_params, num_step, tau=0.1):
         """Parameter update with SGD optimizer.
         """
         updated_names_weights_dict = dict()
         for key in names_grads_wrt_params_dict.keys():
             if names_grads_wrt_params_dict[key] is None:
                 continue
-            updated_names_weights_dict[key] = names_weights_dict[key] - \
-                                              self.names_learning_rates_dict[key.replace(".", "-")][num_step] \
-                                              * names_grads_wrt_params_dict[key]
+            if self.alfa:
+                updated_names_weights_dict[key] = (1 - generated_beta_params[key] * self.names_weight_decay_dict[key.replace(".", "-")][num_step]) * names_weights_dict[key] \
+                                                  - generated_alpha_params[key] * self.names_learning_rates_dict[key.replace(".", "-")][num_step] * names_grads_wrt_params_dict[key]
+            else:
+                updated_names_weights_dict[key] = names_weights_dict[key] - \
+                                                  self.names_learning_rates_dict[key.replace(".", "-")][num_step] \
+                                                  * names_grads_wrt_params_dict[key]
 
         return updated_names_weights_dict
 
 
-    def update_adam(self, names_weights_dict, names_grads_wrt_params_dict, num_step, tau=0.1, amsgrad=False):
+    def update_adam(self, names_weights_dict, names_grads_wrt_params_dict, generated_alpha_params, generated_beta_params, num_step, tau=0.1, amsgrad=False):
         """Parameter update with Adam optimizer.
         """
         updated_names_weights_dict = dict()
@@ -193,12 +207,17 @@ class LSLRGradientDescentLearningRule(nn.Module):
 
             #updated_names_weights_dict[key] = names_weights_dict[key].addcdiv(-step_size, exp_avg, denom)
             #updated_names_weights_dict[key] = names_weights_dict[key].addcdiv(exp_avg, denom, value=-step_size)
-            updated_names_weights_dict[key] = names_weights_dict[key] - step_size * exp_avg / denom
+            if self.alfa:
+                updated_names_weights_dict[key] = (1 - generated_beta_params[key] * self.names_weight_decay_dict[key.replace(".", "-")][num_step]) * names_weights_dict[key] \
+                                                  - generated_alpha_params[key] * self.names_learning_rates_dict[key.replace(".", "-")][num_step] * step_size * exp_avg / denom 
+
+            else:
+                updated_names_weights_dict[key] = names_weights_dict[key] - step_size * exp_avg / denom
 
         return updated_names_weights_dict
 
 
-    def update_adamax(self, names_weights_dict, names_grads_wrt_params_dict, num_step, tau=0.1):
+    def update_adamax(self, names_weights_dict, names_grads_wrt_params_dict, generated_alpha_params, generated_beta_params, num_step, tau=0.1):
         """Parameter update with Adamax optimizer.
         """
         # print('before:')
@@ -239,7 +258,11 @@ class LSLRGradientDescentLearningRule(nn.Module):
             clr = self.names_learning_rates_dict[key.replace(".", "-")][num_step] / bias_correction
 
             #updated_names_weights_dict[key] = names_weights_dict[key].addcdiv(exp_avg, exp_inf, value=-clr)
-            updated_names_weights_dict[key] = names_weights_dict[key] - clr * exp_avg / exp_inf
+            if self.alfa:
+                updated_names_weights_dict[key] = (1 - generated_beta_params[key] * self.names_weight_decay_dict[key.replace(".", "-")][num_step]) * names_weights_dict[key] \
+                                                  - generated_alpha_params[key] * self.names_learning_rates_dict[key.replace(".", "-")][num_step] * clr * exp_avg / exp_inf
+            else:
+                updated_names_weights_dict[key] = names_weights_dict[key] - clr * exp_avg / exp_inf
 
         return updated_names_weights_dict
 
